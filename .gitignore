@@ -1,5 +1,8 @@
-# Credentials (contains passkey - never commit)
+# Credentials
 credentials.json
+
+# GitHub
+.github/
 
 # Python
 __pycache__/

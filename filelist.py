@@ -53,7 +53,7 @@ class filelist(object):
         "movies": "1,2,3,4,6,16,19,20,25,26",
         "music": "5,11,12",
         "software": "8,17,22",
-        "tv": "13,14,21,23,27",
+        "tv": "13,21,23,27",
     }
 
     def __init__(self):
@@ -71,7 +71,7 @@ class filelist(object):
 
         try:
             params, latest_mode = self._build_search_params(what, cat)
-            results = self._request_json(params)
+            results = self._aggregate_results(params)
         except FileListApiError as error:
             self._log_error("Search failed: %s" % error)
             return
@@ -91,7 +91,10 @@ class filelist(object):
                 continue
 
             seen_links.add(link)
-            prettyPrinter(formatted)
+            try:
+                prettyPrinter(formatted)
+            except BrokenPipeError:
+                return
 
     def download_torrent(self, info):
         if not self._ensure_configured():
@@ -227,6 +230,35 @@ class filelist(object):
             parsed_filters["episode"] = str(int(episode))
 
         return parsed_filters
+
+    def _expand_category_requests(self, params):
+        category_value = self._coerce_text(params.get("category"))
+        if params.get("action") != "search-torrents" or "," not in category_value:
+            return [dict(params)]
+
+        expanded_params = []
+        for category_id in category_value.split(","):
+            normalized_category = category_id.strip()
+            if not normalized_category:
+                continue
+
+            request_params = dict(params)
+            request_params["category"] = normalized_category
+            expanded_params.append(request_params)
+
+        if expanded_params:
+            return expanded_params
+        return [dict(params)]
+
+    def _aggregate_results(self, params):
+        aggregated_results = []
+        for request_params in self._expand_category_requests(params):
+            response = self._request_json(request_params)
+            if not isinstance(response, list):
+                raise FileListApiError("Unexpected API response type '%s'." % type(response).__name__)
+            aggregated_results.extend(response)
+
+        return aggregated_results
 
     def _request_json(self, params):
         try:

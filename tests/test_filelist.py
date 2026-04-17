@@ -148,6 +148,71 @@ def test_search_prints_unique_results(configured_engine, printed_results, monkey
     assert printed_results[0]["name"] == "Result.One"
 
 
+def test_search_fans_out_multi_category_requests(configured_engine, printed_results, monkeypatch):
+    requested_categories = []
+
+    def fake_request_json(params):
+        requested_categories.append(params["category"])
+        return [
+            {
+                "id": params["category"],
+                "name": "Result.%s" % params["category"],
+                "download_link": "https://filelist.io/download.php?id=%s&passkey=test" % params["category"],
+                "upload_date": "2026-04-17 11:51:32",
+                "size": 1,
+                "seeders": 2,
+                "leechers": 3,
+            }
+        ]
+
+    monkeypatch.setattr(configured_engine, "_request_json", fake_request_json)
+
+    configured_engine.search("tt0121955 s19e01", "tv")
+
+    assert requested_categories == ["13", "21", "23", "27"]
+    assert len(printed_results) == 4
+
+
+def test_search_stops_cleanly_on_broken_pipe(configured_engine, monkeypatch, capsys):
+    printer_calls = []
+
+    def fake_request_json(_params):
+        return [
+            {
+                "id": 1,
+                "name": "Result.One",
+                "download_link": "https://filelist.io/download.php?id=1&passkey=test",
+                "upload_date": "2026-04-17 11:51:32",
+                "size": 1,
+                "seeders": 2,
+                "leechers": 3,
+            },
+            {
+                "id": 2,
+                "name": "Result.Two",
+                "download_link": "https://filelist.io/download.php?id=2&passkey=test",
+                "upload_date": "2026-04-17 11:51:32",
+                "size": 1,
+                "seeders": 2,
+                "leechers": 3,
+            },
+        ]
+
+    def fake_pretty_printer(_result):
+        printer_calls.append(1)
+        raise BrokenPipeError()
+
+    monkeypatch.setattr(configured_engine, "_request_json", fake_request_json)
+    monkeypatch.setattr(filelist_module, "prettyPrinter", fake_pretty_printer)
+
+    configured_engine.search("ubuntu", "all")
+
+    captured = capsys.readouterr()
+    assert len(printer_calls) == 1
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_search_logs_api_errors_to_stderr(configured_engine, monkeypatch, capsys):
     def fake_request_json(_params):
         raise filelist_module.FileListApiError("boom")

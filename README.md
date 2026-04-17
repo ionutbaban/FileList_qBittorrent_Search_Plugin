@@ -7,12 +7,13 @@ Search FileList directly from qBittorrent using the official Python search plugi
 - qBittorrent-compatible single-file plugin
 - FileList API integration with username + passkey credentials
 - Name search
-- IMDB search
-- Combined IMDB + name filter, for example `tt0121955 s19e01`
+- IMDb search
+- Combined IMDb + name filter, for example `tt0121955 s19e01`
 - Category-aware searches from the qBittorrent category selector
 - Optional API filters from the search box: `freeleech:1`, `internal:1`, `doubleup:1`, `moderated:1`, `season:19`, `episode:1`
 - Latest torrents mode with `.` and optional `limit:N`
 - Authenticated `.torrent` download flow for private tracker results
+- Official Nova3 smoke-test harness and pytest regression suite
 
 ## Requirements
 
@@ -114,6 +115,7 @@ The plugin supports these qBittorrent categories:
 
 - FileList returns `.torrent` download links, not magnet links.
 - The plugin implements authenticated torrent download to improve compatibility with private tracker downloads.
+- qBittorrent categories such as `movies` and `tv` expand into their underlying FileList category ids for `search-torrents`, so one qBittorrent search can cover all mapped subcategories.
 - If the API does not return a usable publish date, the plugin emits `-1` for `pub_date` as allowed by the qBittorrent plugin format.
 
 ## Testing
@@ -125,27 +127,26 @@ The official qBittorrent documentation recommends testing plugins through the No
 Bootstrap the helper files into a local ignored directory:
 
 ```bash
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python scripts/bootstrap_nova3_harness.py
+python scripts/bootstrap_nova3_harness.py
 ```
 
 This downloads the Nova3 helper files from qBittorrent commit `89201bd142398c519ab998f70fbb5898723f4494` into `.qbt-test/nova3/`, creates `.qbt-test/nova3/engines/`, copies `filelist.py`, and copies `credentials.json` if it exists in the repository root. If `credentials.json` is missing, the bootstrap writes a placeholder from `credentials.json.example` so you can fill it in manually.
 
-Run an official search smoke test:
+Re-run the bootstrap script after changing `filelist.py` or `credentials.json` so the harness copy stays current.
+
+Run official search smoke tests:
 
 ```bash
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python .qbt-test/nova3/nova2.py filelist all ubuntu
-```
-
-Run an IMDb + season smoke test:
-
-```bash
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python .qbt-test/nova3/nova2.py filelist tv tt0121955 s19e01
+python .qbt-test/nova3/nova2.py filelist all ubuntu
+python .qbt-test/nova3/nova2.py filelist tv tt0121955 s19e01
+python .qbt-test/nova3/nova2.py filelist movies .
 ```
 
 Run an official download smoke test with an actual `download_link` returned by the API:
 
 ```bash
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python .qbt-test/nova3/nova2dl.py filelist "https://filelist.io/download.php?id=TORRENT_ID&passkey=YOUR_PASSKEY"
+link=$(python .qbt-test/nova3/nova2.py filelist all ubuntu | awk -F'|' 'NR==1 {print $1; exit}')
+python .qbt-test/nova3/nova2dl.py filelist "$link"
 ```
 
 `nova2.py` should print only pipe-delimited search results to stdout. Any debug or error output belongs on stderr.
@@ -155,8 +156,8 @@ Run an official download smoke test with an actual `download_link` returned by t
 Install the dev dependency and run pytest:
 
 ```bash
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python -m pip install -r requirements-dev.txt
-/home/ionut/projects/qbittorrent_filelist_search_plugin/.venv/bin/python -m pytest
+python -m pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 ## Troubleshooting
@@ -184,289 +185,11 @@ qBittorrent's WebUI still relies on the backend search plugin system. If a resul
 - Use the exact `download_link` returned by the API, not a manually constructed placeholder id.
 - Confirm that the FileList account can actually download torrents. Account state problems can return an HTML error page instead of a `.torrent` file.
 - If the first request returns HTML, the plugin retries the download with explicit query authentication.
-*** Add File: /home/ionut/projects/qbittorrent_filelist_search_plugin/requirements-dev.txt
-pytest>=8,<9
-*** Add File: /home/ionut/projects/qbittorrent_filelist_search_plugin/pytest.ini
-[pytest]
-testpaths = tests
-python_files = test_*.py
-*** Add File: /home/ionut/projects/qbittorrent_filelist_search_plugin/scripts/bootstrap_nova3_harness.py
-#!/usr/bin/env python3
 
-import argparse
-import shutil
-import sys
-import urllib.error
-import urllib.request
-from pathlib import Path
+### Shell smoke tests show BrokenPipeError
 
-
-QBT_REPO_REF = "89201bd142398c519ab998f70fbb5898723f4494"
-QBT_NOVA3_BASE_URL = (
-  "https://raw.githubusercontent.com/qbittorrent/"
-  f"qBittorrent/{QBT_REPO_REF}/src/searchengine/nova3"
-)
-HELPER_FILES = (
-  "nova2.py",
-  "nova2dl.py",
-  "helpers.py",
-  "novaprinter.py",
-  "socks.py",
-)
-
-
-def parse_args():
-  parser = argparse.ArgumentParser(
-    description="Bootstrap the official qBittorrent Nova3 helper files for local smoke testing."
-  )
-  parser.add_argument(
-    "--target",
-    default=".qbt-test/nova3",
-    help="Directory where the Nova3 helper files will be created.",
-  )
-  parser.add_argument(
-    "--plugin",
-    default="filelist.py",
-    help="Path to the plugin file that should be copied into the harness engines directory.",
-  )
-  parser.add_argument(
-    "--credentials",
-    default="credentials.json",
-    help="Path to the credentials file to copy into the harness engines directory.",
-  )
-  parser.add_argument(
-    "--force",
-    action="store_true",
-    help="Overwrite any existing helper files in the target directory.",
-  )
-  return parser.parse_args()
-
-
-def download_helper_file(target_dir, filename, force):
-  destination = target_dir / filename
-  if destination.exists() and not force:
-    return
-
-  source_url = f"{QBT_NOVA3_BASE_URL}/{filename}"
-  try:
-    with urllib.request.urlopen(source_url, timeout=30) as response:
-      destination.write_bytes(response.read())
-  except urllib.error.URLError as error:
-    raise SystemExit(f"Failed to download {source_url}: {error}")
-
-
-def copy_plugin_files(project_root, target_dir, plugin_path, credentials_path):
-  engines_dir = target_dir / "engines"
-  engines_dir.mkdir(parents=True, exist_ok=True)
-  (engines_dir / "__init__.py").write_text("", encoding="utf-8")
-
-  source_plugin = (project_root / plugin_path).resolve()
-  if not source_plugin.exists():
-    raise SystemExit(f"Plugin file not found: {source_plugin}")
-
-  shutil.copy2(source_plugin, engines_dir / source_plugin.name)
-
-  source_credentials = (project_root / credentials_path).resolve()
-  if source_credentials.exists():
-    shutil.copy2(source_credentials, engines_dir / "credentials.json")
-    return
-
-  credentials_example = project_root / "credentials.json.example"
-  if credentials_example.exists():
-    shutil.copy2(credentials_example, engines_dir / "credentials.json")
-    print(
-      "credentials.json was not found at the project root; copied credentials.json.example instead.",
-      file=sys.stderr,
-    )
-    return
-
-  raise SystemExit("Neither credentials.json nor credentials.json.example could be found.")
-
-
-def main():
-  args = parse_args()
-  project_root = Path(__file__).resolve().parents[1]
-  target_dir = (project_root / args.target).resolve()
-  target_dir.mkdir(parents=True, exist_ok=True)
-
-  for helper_file in HELPER_FILES:
-    download_helper_file(target_dir, helper_file, args.force)
-
-  copy_plugin_files(project_root, target_dir, args.plugin, args.credentials)
-
-  print(f"Nova3 smoke-test harness is ready at {target_dir}")
-
-
-if __name__ == "__main__":
-  main()
-*** Add File: /home/ionut/projects/qbittorrent_filelist_search_plugin/tests/conftest.py
-import sys
-import types
-
-
-stub_novaprinter = types.ModuleType("novaprinter")
-
-
-def _unexpected_pretty_printer(_result):
-  raise AssertionError("prettyPrinter should be monkeypatched by the test that uses it")
-
-
-stub_novaprinter.prettyPrinter = _unexpected_pretty_printer
-sys.modules.setdefault("novaprinter", stub_novaprinter)
-*** Add File: /home/ionut/projects/qbittorrent_filelist_search_plugin/tests/test_filelist.py
-import json
-from pathlib import Path
-
-import pytest
-
-import filelist as filelist_module
-
-
-@pytest.fixture
-def configured_engine(monkeypatch):
-  def fake_load(self):
-    self._username = "user"
-    self._passkey = "passkey"
-    self._authorization_header = "Basic dXNlcjpwYXNza2V5"
-    self._configuration_error = None
-
-  monkeypatch.setattr(filelist_module.filelist, "_load_credentials", fake_load)
-  return filelist_module.filelist()
-
-
-@pytest.fixture
-def printed_results(monkeypatch):
-  results = []
-  monkeypatch.setattr(filelist_module, "prettyPrinter", results.append)
-  return results
-
-
-def make_uninitialized_engine(credentials_path):
-  engine = filelist_module.filelist.__new__(filelist_module.filelist)
-  engine._credentials_path = credentials_path
-  engine._username = ""
-  engine._passkey = ""
-  engine._authorization_header = ""
-  engine._configuration_error = None
-  return engine
-
-
-def test_build_search_params_parses_documented_shorthand(configured_engine):
-  params, latest_mode = configured_engine._build_search_params("tt0121955%20s19e01", "tv")
-
-  assert latest_mode is False
-  assert params["action"] == "search-torrents"
-  assert params["type"] == "imdb"
-  assert params["query"] == "tt0121955"
-  assert params["season"] == "19"
-  assert params["episode"] == "1"
-  assert params["category"] == configured_engine.supported_categories["tv"]
-
-
-def test_build_search_params_parses_latest_limit_and_category(configured_engine):
-  params, latest_mode = configured_engine._build_search_params(".%20limit:999", "movies")
-
-  assert latest_mode is True
-  assert params == {
-    "output": "json",
-    "category": configured_engine.supported_categories["movies"],
-    "action": "latest-torrents",
-    "limit": "100",
-  }
-
-
-def test_request_json_retries_with_query_auth(configured_engine, monkeypatch):
-  calls = []
-
-  def fake_request_text(url, params, use_query_auth=False):
-    calls.append(use_query_auth)
-    if len(calls) == 1:
-      raise filelist_module.FileListApiError("retry", retry_with_query_auth=True)
-    return json.dumps([{"id": 1}])
-
-  monkeypatch.setattr(configured_engine, "_request_text", fake_request_text)
-
-  assert configured_engine._request_json({"action": "latest-torrents"}) == [{"id": 1}]
-  assert calls == [False, True]
-
-
-@pytest.mark.parametrize(
-  ("value", "expected"),
-  [
-    ("2026-04-17 11:51:32", "1776426692"),
-    ("2026-04-17T11:51:32", "1776426692"),
-    ("2026-04-17T11:51:32+00:00", "1776426692"),
-    (1776426692, "1776426692"),
-    (1776426692000, "1776426692"),
-  ],
-)
-def test_normalize_timestamp_supports_multiple_formats(configured_engine, value, expected):
-  assert configured_engine._normalize_timestamp(value) == expected
-
-
-def test_format_result_builds_desc_link_and_tags(configured_engine):
-  formatted = configured_engine._format_result(
-    {
-      "id": 123,
-      "name": "Example.Release",
-      "download_link": "https://filelist.io/download.php?id=123&passkey=test",
-      "upload_date": "2026-04-17 11:51:32",
-      "size": 42,
-      "seeders": 10,
-      "leechers": 2,
-      "freeleech": 1,
-      "internal": 1,
-      "doubleup": 0,
-    },
-    latest_mode=False,
-  )
-
-  assert formatted == {
-    "desc_link": "https://filelist.io/details.php?id=123",
-    "engine_url": "https://filelist.io",
-    "leech": "2",
-    "link": "https://filelist.io/download.php?id=123&passkey=test",
-    "name": "[FREELEECH] [INTERNAL] Example.Release",
-    "pub_date": "1776426692",
-    "seeds": "10",
-    "size": "42",
-  }
-
-
-def test_search_prints_unique_results(configured_engine, printed_results, monkeypatch):
-  def fake_request_json(_params):
-    return [
-      {
-        "id": 1,
-        "name": "Result.One",
-        "download_link": "https://filelist.io/download.php?id=1&passkey=test",
-        "upload_date": "2026-04-17 11:51:32",
-        "size": 1,
-        "seeders": 2,
-        "leechers": 3,
-      },
-      {
-        "id": 2,
-        "name": "Result.Duplicate",
-        "download_link": "https://filelist.io/download.php?id=1&passkey=test",
-        "upload_date": "2026-04-17 11:51:32",
-        "size": 1,
-        "seeders": 2,
-        "leechers": 3,
-      },
-    ]
-
-  monkeypatch.setattr(configured_engine, "_request_json", fake_request_json)
-
-  configured_engine.search("ubuntu", "all")
-
-  assert len(printed_results) == 1
-  assert printed_results[0]["name"] == "Result.One"
-
-
-def test_search_logs_api_errors_to_stderr(configured_engine, monkeypatch, capsys):
-  def fake_request_json(_params):
-    raise filelist_module.FileListApiError("boom")
+- Re-run `python scripts/bootstrap_nova3_harness.py` after updating the plugin so the harness copy includes the current broken-pipe handling.
+- The current plugin stops cleanly when stdout closes early during shell pipelines.
 
   monkeypatch.setattr(configured_engine, "_request_json", fake_request_json)
 
