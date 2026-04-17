@@ -1,0 +1,9 @@
+# Credentials (contains passkey - never commit)
+credentials.json
+
+# Python
+__pycache__/
+.pytest_cache/
+
+# Local test harness
+.qbt-test/
