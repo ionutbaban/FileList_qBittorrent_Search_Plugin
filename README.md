@@ -122,27 +122,63 @@ The plugin supports these qBittorrent categories:
 
 The official qBittorrent documentation recommends testing plugins through the Nova3 helper scripts rather than importing the plugin class directly.
 
-### Official Nova3 smoke test
+### Offline tests
 
-Bootstrap the helper files into a local ignored directory:
+With the repository virtual environment activated, install the dev dependency and run the local regression suite:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+This covers the parser, formatting, auth fallback, and download behavior without requiring live FileList access.
+
+### Remote live tests
+
+Live FileList validation should be run on the reachable host because `filelist.io` is blocked on the current local host. The remote checkout is at `~/projects/FileList_qBittorrent_Search_Plugin`.
+
+After connecting to the reachable host, run these commands from `~/projects/FileList_qBittorrent_Search_Plugin`.
+
+These commands assume the repository virtual environment is activated on the reachable host.
+
+Run the remote regression suite:
+
+```bash
+python -m pytest
+```
+
+Run the integrated live Nova3 pytest suite:
+
+```bash
+python -m pytest --live -m live
+```
+
+This opt-in suite bootstraps the Nova3 harness, runs the live search smoke tests, and verifies that the download smoke test returns a torrent payload.
+
+### Manual Nova3 debugging
+
+Use these commands only when you need to debug a specific live failure outside the integrated live pytest suite.
+
+Bootstrap the helper files:
 
 ```bash
 python scripts/bootstrap_nova3_harness.py
 ```
 
-This downloads the Nova3 helper files from qBittorrent commit `89201bd142398c519ab998f70fbb5898723f4494` into `.qbt-test/nova3/`, creates `.qbt-test/nova3/engines/`, copies `filelist.py`, and copies `credentials.json` if it exists in the repository root. If `credentials.json` is missing, the bootstrap writes a placeholder from `credentials.json.example` so you can fill it in manually.
-
 Re-run the bootstrap script after changing `filelist.py` or `credentials.json` so the harness copy stays current.
 
-Run official search smoke tests:
+Run the manual search smoke tests:
 
 ```bash
 python .qbt-test/nova3/nova2.py filelist all ubuntu
+python .qbt-test/nova3/nova2.py filelist tv simpsons
 python .qbt-test/nova3/nova2.py filelist tv tt0121955 s19e01
 python .qbt-test/nova3/nova2.py filelist movies .
 ```
 
-Run an official download smoke test with an actual `download_link` returned by the API:
+`tv simpsons` is the positive-result TV smoke test. `tv tt0121955 s19e01` is still useful as an episode-filter query, but it may legitimately return zero rows depending on current tracker contents.
+
+Run the manual download smoke test with an actual `download_link` returned by the API:
 
 ```bash
 link=$(python .qbt-test/nova3/nova2.py filelist all ubuntu | awk -F'|' 'NR==1 {print $1; exit}')
@@ -151,14 +187,7 @@ python .qbt-test/nova3/nova2dl.py filelist "$link"
 
 `nova2.py` should print only pipe-delimited search results to stdout. Any debug or error output belongs on stderr.
 
-### Automated tests
-
-Install the dev dependency and run pytest:
-
-```bash
-python -m pip install -r requirements-dev.txt
-python -m pytest
-```
+The preferred live validation path is still `python -m pytest --live -m live`.
 
 ## Troubleshooting
 
@@ -190,66 +219,3 @@ qBittorrent's WebUI still relies on the backend search plugin system. If a resul
 
 - Re-run `python scripts/bootstrap_nova3_harness.py` after updating the plugin so the harness copy includes the current broken-pipe handling.
 - The current plugin stops cleanly when stdout closes early during shell pipelines.
-
-  monkeypatch.setattr(configured_engine, "_request_json", fake_request_json)
-
-  configured_engine.search("ubuntu", "all")
-
-  captured = capsys.readouterr()
-  assert captured.out == ""
-  assert "Search failed: boom" in captured.err
-
-
-def test_download_torrent_retries_and_writes_binary_file(configured_engine, monkeypatch, capsys):
-  responses = [
-    (b"<!DOCTYPE html><html></html>", "text/html; charset=utf-8"),
-    (b"torrent-data", "application/x-bittorrent"),
-  ]
-  calls = []
-
-  def fake_request_binary(url, use_query_auth=False):
-    calls.append(use_query_auth)
-    return responses.pop(0)
-
-  monkeypatch.setattr(configured_engine, "_request_binary", fake_request_binary)
-
-  configured_engine.download_torrent("https://filelist.io/download.php?id=1&passkey=test")
-
-  captured = capsys.readouterr()
-  output_parts = captured.out.strip().split(" ", 1)
-  assert calls == [False, True]
-  assert len(output_parts) == 2
-  torrent_path = Path(output_parts[0])
-  assert torrent_path.read_bytes() == b"torrent-data"
-  torrent_path.unlink()
-
-
-def test_download_torrent_logs_when_html_persists(configured_engine, monkeypatch, capsys):
-  def fake_request_binary(_url, use_query_auth=False):
-    return (b"<html></html>", "text/html")
-
-  monkeypatch.setattr(configured_engine, "_request_binary", fake_request_binary)
-
-  configured_engine.download_torrent("https://filelist.io/download.php?id=1&passkey=test")
-
-  captured = capsys.readouterr()
-  assert captured.out == ""
-  assert "Download failed: FileList returned HTML instead of a torrent file." in captured.err
-
-
-def test_load_credentials_reports_missing_file(tmp_path):
-  engine = make_uninitialized_engine(tmp_path / "credentials.json")
-
-  engine._load_credentials()
-
-  assert "Missing credentials.json next to filelist.py" in engine._configuration_error
-
-
-def test_load_credentials_reports_invalid_json(tmp_path):
-  credentials_path = tmp_path / "credentials.json"
-  credentials_path.write_text("not-json", encoding="utf-8")
-  engine = make_uninitialized_engine(credentials_path)
-
-  engine._load_credentials()
-
-  assert "Invalid credentials.json" in engine._configuration_error
